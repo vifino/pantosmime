@@ -9,10 +9,12 @@ use std::borrow::Cow;
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 use crate::mime_parser::MimeContainer;
 use crate::smime;
 
+#[derive(Debug)]
 pub enum MilterAction {
     Encrypt,
     ExtractKeys,
@@ -30,51 +32,55 @@ pub struct MilterContext<'a> {
 }
 
 /// Negotiate the required actions for the signing/encrypting dance.
+#[tracing::instrument(name = "on_negotiate", skip(context))]
 async fn on_negotiate<'a>(context: &mut NegotiateContext<MilterContext<'a>>) -> Status {
     // We need a few special actions.
     context.requested_actions |=
         Actions::ADD_HEADER | Actions::CHANGE_HEADER | Actions::REPLACE_BODY;
-
+    info!("Negotiating actions: added ADD_HEADER, CHANGE_HEADER, and REPLACE_BODY");
     Status::Continue
 }
 
 /// Check if sender is in whitelist.
+#[tracing::instrument(name = "on_mail", skip(context, args))]
 async fn on_mail<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString>) -> Status {
-    // TODO: Check if this sender is in our whitelist, if not, we should send
-    // Status::Accept to stop processing.
     if let Some(sender) = args.into_iter().next() {
-        let sender = sender.to_string_lossy().to_string();
+        let sender_str = sender.to_string_lossy().to_string();
         context.data = Some(MilterContext {
-            sender,
+            sender: sender_str.clone(),
             recipients: Vec::new(),
             ..Default::default()
         });
+        debug!(%sender_str, "Sender accepted and context initialized");
         Status::Continue
     } else {
-        // TODO: log
+        warn!("No sender provided in on_mail; rejecting message");
         Status::Reject
     }
 }
 
 /// Check if keys are available for recipient.
 /// If yes, add to recipients, otherwise reject
+#[tracing::instrument(name = "on_rcpt", skip(context, args))]
 async fn on_rcpt<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString>) -> Status {
-    // TODO: Normalize?
-    if let Some(sender) = args.into_iter().next() {
+    if let Some(recipient) = args.into_iter().next() {
         if let Some(ctx) = &mut context.data {
-            ctx.recipients.push(sender.to_string_lossy().to_string());
+            let recipient_str = recipient.to_string_lossy().to_string();
+            ctx.recipients.push(recipient_str.clone());
+            debug!(%recipient_str, "Added recipient to context");
             Status::Continue
         } else {
-            // TODO: log
+            error!("Context data is missing in on_rcpt; rejecting message");
             Status::Reject
         }
     } else {
-        // TODO: log
+        warn!("No recipient provided in on_rcpt; rejecting message");
         Status::Reject
     }
 }
 
 /// Process headers
+#[tracing::instrument(name = "on_header", skip(context, name, value, responsible))]
 async fn on_header<'a>(
     context: &mut Context<MilterContext<'a>>,
     name: CString,
@@ -83,11 +89,14 @@ async fn on_header<'a>(
 ) -> Status {
     let ctx = match context.data.as_mut() {
         Some(ctx) => ctx,
-        None => return Status::Reject,
+        None => {
+            error!("Missing context data in on_header; rejecting message");
+            return Status::Reject;
+        }
     };
 
+    // Decide on action if not already set.
     if ctx.action.is_none() {
-        // Fate hasn't been decided yet.
         match responsible.as_ref().iter().find_map(|e| {
             let e = e.as_str();
             if e.eq_ignore_ascii_case(&ctx.sender) {
@@ -98,13 +107,19 @@ async fn on_header<'a>(
                 None
             }
         }) {
-            Some(action) => ctx.action = Some(action),
-            None => return Status::Accept, // TODO: no further processing, log
+            Some(action) => {
+                info!("Need to perform {:?} on message", action);
+                ctx.action = Some(action);
+            }
+            None => {
+                debug!("Not responsible for neither sender nor recipients; no further processing");
+                return Status::Accept;
+            }
         };
     };
 
-    let name = name.to_string_lossy();
-    let value = value.to_string_lossy();
+    let name_str = name.to_string_lossy();
+    let value_str = value.to_string_lossy();
     let interesting_headers = vec![
         "MIME-Version",
         "Content-Type",
@@ -113,39 +128,47 @@ async fn on_header<'a>(
     ];
     if !interesting_headers
         .iter()
-        .any(|h| h.eq_ignore_ascii_case(&name))
+        .any(|h| h.eq_ignore_ascii_case(&name_str))
     {
-        ctx.headers
-            .push((Cow::Owned(name.to_string()), Cow::Owned(value.to_string())));
+        ctx.headers.push((
+            Cow::Owned(name_str.to_string()),
+            Cow::Owned(value_str.to_string()),
+        ));
+        debug!(header = %name_str, value = %value_str, "Added custom header");
     }
     Status::Continue
 }
 
 /// Check if Headers are complete enough to encrypt content.
+#[tracing::instrument(name = "on_eoh", skip(context))]
 async fn on_eoh<'a>(context: &mut Context<MilterContext<'a>>) -> Status {
-    // TODO: Check if headers are complete, then Continue, otherwise Reject
     if let Some(ctx) = &mut context.data {
         if ctx.headers.is_empty() {
-            // TODO: log, no headers
+            warn!("Headers are empty in on_eoh; rejecting message");
             return Status::Reject;
         }
+        info!("Headers are complete");
         Status::Continue
     } else {
-        // TODO: log
+        error!("Missing context data in on_eoh; rejecting message");
         Status::Reject
     }
 }
 
 /// Parse body
+#[tracing::instrument(name = "on_body", skip(context, data))]
 async fn on_body<'a>(context: &mut Context<MilterContext<'a>>, data: Bytes) -> Status {
     if let Some(ctx) = &mut context.data {
         ctx.body.extend_from_slice(&data);
+        debug!(body_len = %ctx.body.len(), "Accumulated body data");
         Status::Continue
     } else {
+        error!("Missing context data in on_body; rejecting message");
         Status::Reject
     }
 }
 
+#[tracing::instrument(name = "update_headers", skip(ctx, actions, new_headers))]
 async fn update_headers<'a>(
     ctx: &mut MilterContext<'a>,
     actions: &EomActions,
@@ -158,6 +181,12 @@ async fn update_headers<'a>(
             .find(|t| t.0.as_ref().eq_ignore_ascii_case(updated_key.as_ref()))
         {
             if current_value != updated_value {
+                debug!(
+                    key = %current_key,
+                    old_value = %current_value,
+                    new_value = %updated_value,
+                    "Changing header"
+                );
                 actions
                     .change_header(
                         current_key.into_c_string(),
@@ -167,6 +196,11 @@ async fn update_headers<'a>(
                     .await?;
             }
         } else {
+            debug!(
+                key = %updated_key,
+                value = %updated_value,
+                "Adding new header"
+            );
             actions
                 .add_header(updated_key.into_c_string(), updated_value.into_c_string())
                 .await?;
@@ -178,15 +212,22 @@ async fn update_headers<'a>(
 }
 
 /// Actually rewrite the content!
+#[tracing::instrument(name = "on_eom", skip(context, cert_dir))]
 async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathBuf) -> Status {
     let ctx = match context.data.as_mut() {
         Some(ctx) => ctx,
-        None => return Status::Reject,
+        None => {
+            error!("Missing context data in on_eom; rejecting message");
+            return Status::Reject;
+        }
     };
 
     let action = match &ctx.action {
         Some(a) => a,
-        None => return Status::Reject, // TODO: log error
+        None => {
+            error!("No action determined in on_eom; rejecting message");
+            return Status::Reject;
+        }
     };
 
     match action {
@@ -194,7 +235,10 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
             // Encrypt and encode actual body.
             let encrypted = match smime::encrypt_data(&ctx.body, &ctx.recipients, &cert_dir) {
                 Ok(data) => data,
-                Err(_) => return Status::Reject, // TODO: log
+                Err(e) => {
+                    error!(error = ?e, "Failed to encrypt message body");
+                    return Status::Reject;
+                }
             };
             let encoded = BASE64_STANDARD.encode(&encrypted);
             let wrapped_len = encoded.len() + (encoded.len() / 76) * 2 + 2;
@@ -220,14 +264,16 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
                 ),
             ];
 
-            if let Err(_) = update_headers(ctx, &context.actions, new_headers).await {
-                // TODO: log error
+            if let Err(e) = update_headers(ctx, &context.actions, new_headers).await {
+                error!(error = ?e, "Failed to update headers in on_eom for encryption");
                 return Status::Reject;
             }
 
             if context.actions.replace_body(&wrapped).await.is_err() {
+                error!("Failed to replace body after encryption");
                 return Status::Reject;
             }
+            info!("Encryption successful, accepting mail");
             Status::Accept
         }
 
@@ -236,10 +282,13 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
             let body_str = String::from_utf8_lossy(&ctx.body);
             let container = match MimeContainer::parse_mime_container_data(
                 &body_str,
-                ctx.headers.clone(), // TODO: eliminate clone
+                ctx.headers.clone(), // TODO: eliminate clone if possible
             ) {
                 Ok((_, container)) => container,
-                Err(_) => return Status::Reject, // TODO: log error
+                Err(e) => {
+                    error!(error = ?e, "Failed to parse MIME container in on_eom for key extraction");
+                    return Status::Reject;
+                }
             };
 
             // TODO: Check if smime signed message

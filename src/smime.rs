@@ -4,7 +4,6 @@ use openssl::cms::{CMSOptions, CmsContentInfo};
 use openssl::stack::Stack;
 use openssl::symm::Cipher;
 use openssl::x509::X509;
-use std::collections::HashMap;
 use std::convert::AsRef;
 use std::iter::IntoIterator;
 use std::path::PathBuf;
