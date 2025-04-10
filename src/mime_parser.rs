@@ -160,6 +160,13 @@ fn parse_multipart_container<'a>(
 }
 
 impl<'a> MimeContainer<'a> {
+    pub fn find_header_value(&'a self, header: &str) -> Option<Cow<'a, str>> {
+        self.headers
+            .iter()
+            .find(|e| e.0.eq_ignore_ascii_case(header))
+            .map(|e| e.1.clone())
+    }
+
     /// Parse a MIME container's body.
     /// If the message is multipart, delegate to the multipart parser.
     pub fn parse_mime_container_data(

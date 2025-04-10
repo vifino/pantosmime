@@ -317,7 +317,7 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
         MilterAction::ExtractKeys => {
             // Parse using MIME Parser.
             let body_str = String::from_utf8_lossy(&ctx.body);
-            let _container = match MimeContainer::parse_mime_container_data(
+            let container = match MimeContainer::parse_mime_container_data(
                 &body_str,
                 ctx.headers.clone(), // TODO: eliminate clone if possible
             ) {
@@ -328,12 +328,82 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
                 }
             };
 
-            // TODO: Check if smime signed message
-            // TODO: Iterate through message parts to find one with content type "application/pkcs7-signature".
-            // TODO: De-B64 and validate if cert is valid for sender?
-            // TODO: extract_signers_from_p7s, find_cert_for_email
-            // TODO: Save PEM into <sender>.pem file.
-            todo!()
+            // Check if smime signed message
+            if !container
+                .find_header_value("Content-Type")
+                .is_some_and(|e| e.to_lowercase().contains("multipart/signed"))
+            {
+                info!("Message does not contain multipart/signed content, moving on");
+                return Status::Accept;
+            }
+
+            // Iterate through message parts to find one with content type "application/pkcs7-signature".
+            let signature_part = match container.parts.iter().find(|p| {
+                p.find_header_value("Content-Type").is_some_and(|e| {
+                    let e = e.to_lowercase();
+                    e.contains("application/pkcs7-signature")
+                        || e.contains("application/x-pkcs7-signature")
+                })
+            }) {
+                Some(sp) => sp,
+                None => {
+                    error!(
+                        "Message is multipart/signed, but didn't find any PKCS#7 signature part"
+                    );
+                    return Status::Reject;
+                }
+            };
+
+            // De-B64 and validate if cert is valid for sender?
+            let mut signature_data = signature_part.body.to_string();
+            signature_data.retain(|c| !c.is_whitespace());
+            let decoded = match BASE64_STANDARD.decode(signature_data.as_bytes()) {
+                Ok(data) => data,
+                Err(error) => {
+                    error!(?error, "Failed to decrypt signature");
+                    return Status::Reject;
+                }
+            };
+
+            // Extract the cert and verify it's got a cert matching the sender.
+            let cert_chain = match smime::extract_certificates_from_p7s(&decoded) {
+                Ok(chain) => chain,
+                Err(error) => {
+                    error!(?error, "Failed to extract signers from signature");
+                    return Status::Reject;
+                }
+            };
+            if let Err(error) = smime::find_cert_for_email(&cert_chain, &ctx.sender) {
+                error!(
+                    ?error,
+                    "Failed to find signature certificate matching sender"
+                );
+                return Status::Reject;
+            }
+            info!(sender = ?ctx.sender, cert_count = ?cert_chain.len(), "Found signature for sender");
+
+            // Save PEM into <sender>.pem file.
+            let path = cert_dir.join(format!("{}.pem", ctx.sender));
+            if let Err(error) = smime::write_pem_stack(cert_chain, &path).await {
+                error!(
+                    ?error,
+                    "Failed to write signature certificate chain to File"
+                );
+                return Status::Reject;
+            }
+            if context
+                .actions
+                .add_header(
+                    "X-PANTOSMIME",
+                    "Successfully extracted signature and certificate chain. Yay!",
+                )
+                .await
+                .is_err()
+            {
+                error!("Failed adding X-PANOSMIME header")
+            };
+            info!("Successfully extracted certificate chain from Email");
+            Status::Accept
         }
     }
 }

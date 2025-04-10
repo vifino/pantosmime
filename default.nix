@@ -13,8 +13,8 @@ rustPlatform.buildRustPackage {
     (path: type: builtins.any (suf: hasPrefix (toString suf) path) [./src ./Cargo.toml ./Cargo.lock])
     ./.;
 
-  nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ openssl ];
+  nativeBuildInputs = [pkg-config];
+  buildInputs = [openssl];
 
   cargoLock = {
     lockFile = ./Cargo.lock;

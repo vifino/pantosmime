@@ -3,10 +3,10 @@ use anyhow::Context;
 use anyhow::Result;
 use openssl::cms::{CMSOptions, CmsContentInfo};
 use openssl::nid::Nid;
-use openssl::pkcs7::{Pkcs7, Pkcs7Flags};
+use openssl::pkcs7::Pkcs7;
 use openssl::stack::Stack;
 use openssl::symm::Cipher;
-use openssl::x509::X509;
+use openssl::x509::{X509Ref, X509};
 use std::convert::AsRef;
 use std::iter::IntoIterator;
 use std::path::Path;
@@ -14,27 +14,31 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-/// Extracts signer certificates from PKCS#7 DER file content (.p7s)
-fn extract_signers_from_p7s(der_data: &[u8]) -> Result<Stack<X509>> {
+/// Extracts signer certificates plus intermediates from PKCS#7 DER file content (.p7s)
+pub fn extract_certificates_from_p7s(der_data: &[u8]) -> Result<Vec<X509>> {
     let pkcs7 =
         Pkcs7::from_der(der_data).with_context(|| format!("Failed to parse PKCS#7 data"))?;
 
-    // Use empty cert stack (second param is for additional certs, optional)
-    let dummy_stack = Stack::new().context("Failed to create empty X509 stack")?;
-
-    let certs: Stack<X509> = pkcs7
-        .signers(&dummy_stack, Pkcs7Flags::empty())
-        .with_context(|| "No certificates found in PKCS#7 data")?;
-
-    Ok(certs)
+    let signed = pkcs7
+        .signed()
+        .ok_or_else(|| anyhow!("No signed object in PKCS#7 data"))?;
+    let certs = signed
+        .certificates()
+        .ok_or_else(|| anyhow!("Signed object in PKCS#7 data has no child certificates"))?;
+    Ok(certs.into_iter().map(|e| e.to_owned()).collect())
 }
 
 /// Finds the first certificate in the list that matches the given email address.
 /// It checks Subject Alternative Name (SAN) first, then falls back to Subject DN.
-fn find_cert_for_email<'a>(certs: &'a [X509], email: &str) -> Result<&'a X509> {
+pub fn find_cert_for_email<'a, C, I>(certs: I, email: &str) -> Result<X509>
+where
+    C: AsRef<X509Ref>,
+    I: IntoIterator<Item = C>,
+{
     certs
-        .iter()
+        .into_iter()
         .find(|cert| {
+            let cert = cert.as_ref();
             // Check Subject Alternative Names
             cert.subject_alt_names()
             .map(|san| {
@@ -58,10 +62,11 @@ fn find_cert_for_email<'a>(certs: &'a [X509], email: &str) -> Result<&'a X509> {
             .any(|name| name.eq_ignore_ascii_case(email))
         })
         .ok_or_else(|| anyhow!("Failed to find cert for {} in cert stack", email))
+        .and_then(|c| Ok(c.as_ref().to_owned()))
 }
 
 // Loads a certificate stack from a file with multiple PEM certificates
-async fn load_pem_stack(cert: impl AsRef<Path>) -> Result<Vec<X509>> {
+pub async fn load_pem_stack(cert: impl AsRef<Path>) -> Result<Vec<X509>> {
     let cert_content = fs::read(&cert)
         .await
         .with_context(|| format!("Failed to read certificate {:?}", cert.as_ref()))?;
@@ -71,9 +76,9 @@ async fn load_pem_stack(cert: impl AsRef<Path>) -> Result<Vec<X509>> {
 }
 
 // Write a certificate stack to a file with multiple PEM certificates
-async fn write_pem_stack<C, I>(stack: I, to: &Path) -> Result<()>
+pub async fn write_pem_stack<C, I>(stack: I, to: &Path) -> Result<()>
 where
-    C: AsRef<X509>,
+    C: AsRef<X509Ref>,
     I: IntoIterator<Item = C>,
 {
     // Open or create the file, truncate it if it already exists.
