@@ -238,6 +238,17 @@ async fn update_headers<'a>(
     Ok(())
 }
 
+fn wrap_bytes_crlf(buf: &mut BytesMut, wrap_at: usize) {
+    let line_ending = line_wrap::crlf();
+    let len = buf.len();
+    let mut additional_len = (len / wrap_at) * 2;
+    if len % wrap_at == 0 {
+        additional_len -= 2;
+    }
+    buf.resize(len + additional_len, 0);
+    line_wrap::line_wrap(buf, len, wrap_at, &line_ending);
+}
+
 /// Actually rewrite the content!
 #[tracing::instrument(name = "on_eom", skip(context, cert_dir))]
 async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathBuf) -> Status {
@@ -260,7 +271,7 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
     match action {
         MilterAction::Encrypt => {
             // Encrypt and encode actual body.
-            let encrypted = match smime::encrypt_data(&ctx.body, &ctx.recipients, &cert_dir) {
+            let encrypted = match smime::encrypt_data(&ctx.body, &ctx.recipients, &cert_dir).await {
                 Ok(data) => data,
                 Err(e) => {
                     error!(error = ?e, "Failed to encrypt message body");
@@ -268,9 +279,8 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
                 }
             };
             let encoded = BASE64_STANDARD.encode(&encrypted);
-            let wrapped_len = encoded.len() + (encoded.len() / 76) * 2 + 2;
-            let mut wrapped = BytesMut::with_capacity(wrapped_len);
-            line_wrap::line_wrap(&mut wrapped, encoded.len(), 76, &line_wrap::crlf());
+            let mut wrapped = BytesMut::from(encoded.as_bytes());
+            wrap_bytes_crlf(&mut wrapped, 76);
 
             // Reserialize and replace changed headers and body.
             let new_headers = vec![
@@ -321,7 +331,8 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
             // TODO: Check if smime signed message
             // TODO: Iterate through message parts to find one with content type "application/pkcs7-signature".
             // TODO: De-B64 and validate if cert is valid for sender?
-            // TODO: Save DER into <sender>.p7s file.
+            // TODO: extract_signers_from_p7s, find_cert_for_email
+            // TODO: Save PEM into <sender>.pem file.
             todo!()
         }
     }
@@ -376,5 +387,16 @@ mod tests {
                 input
             );
         }
+    }
+
+    #[test]
+    fn test_line_wrap() {
+        let mut data = BytesMut::from("testtest".as_bytes());
+        wrap_bytes_crlf(&mut data, 4);
+        assert_eq!(data, BytesMut::from("test\r\ntest"));
+
+        data = BytesMut::from("testtest".as_bytes());
+        wrap_bytes_crlf(&mut data, 6);
+        assert_eq!(data, BytesMut::from("testte\r\nst"));
     }
 }
