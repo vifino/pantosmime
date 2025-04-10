@@ -1,10 +1,12 @@
 use anyhow::Result;
-use base64::{Engine, prelude::BASE64_STANDARD};
+use base64::{prelude::BASE64_STANDARD, Engine};
 use bytes::{Bytes, BytesMut};
 use indymilter::{
     Actions, Callbacks, Context, ContextActions, EomActions, EomContext, IntoCString,
     NegotiateContext, Status,
 };
+use lazy_static::lazy_static;
+use regex::Regex;
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -31,6 +33,19 @@ pub struct MilterContext<'a> {
     body: BytesMut,
 }
 
+/// Extracts the email address from a sender/recipient field.
+pub fn extract_email(input: &str) -> Option<&str> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r#"(?i)<([^>]+)>|^([^<>\s]+@[^<>\s]+)$"#).unwrap();
+    }
+
+    let input = input.trim();
+
+    RE.captures(input)
+        .and_then(|caps| caps.get(1).or_else(|| caps.get(2)))
+        .map(|m| m.as_str())
+}
+
 /// Negotiate the required actions for the signing/encrypting dance.
 #[tracing::instrument(name = "on_negotiate", skip(context))]
 async fn on_negotiate<'a>(context: &mut NegotiateContext<MilterContext<'a>>) -> Status {
@@ -45,13 +60,19 @@ async fn on_negotiate<'a>(context: &mut NegotiateContext<MilterContext<'a>>) -> 
 #[tracing::instrument(name = "on_mail", skip(context, args))]
 async fn on_mail<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString>) -> Status {
     if let Some(sender) = args.into_iter().next() {
-        let sender_str = sender.to_string_lossy().to_string();
+        let sender_email = match extract_email(&sender.to_string_lossy()) {
+            Some(mail) => mail.to_string(),
+            None => {
+                error!(?sender, "Could not extract sender email");
+                return Status::Reject;
+            }
+        };
+        debug!(%sender_email, "Sender accepted and context initialized");
         context.data = Some(MilterContext {
-            sender: sender_str.clone(),
+            sender: sender_email,
             recipients: Vec::new(),
             ..Default::default()
         });
-        debug!(%sender_str, "Sender accepted and context initialized");
         Status::Continue
     } else {
         warn!("No sender provided in on_mail; rejecting message");
@@ -65,9 +86,15 @@ async fn on_mail<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString
 async fn on_rcpt<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString>) -> Status {
     if let Some(recipient) = args.into_iter().next() {
         if let Some(ctx) = &mut context.data {
-            let recipient_str = recipient.to_string_lossy().to_string();
-            ctx.recipients.push(recipient_str.clone());
-            debug!(%recipient_str, "Added recipient to context");
+            let recipient_email = match extract_email(&recipient.to_string_lossy()) {
+                Some(mail) => mail.to_string(),
+                None => {
+                    error!(?recipient, "Could not extract recipient email");
+                    return Status::Reject;
+                }
+            };
+            debug!(%recipient_email, "Added recipient to context");
+            ctx.recipients.push(recipient_email);
             Status::Continue
         } else {
             error!("Context data is missing in on_rcpt; rejecting message");
@@ -126,7 +153,7 @@ async fn on_header<'a>(
         "Content-Transfer-Encoding",
         "Content-Disposition",
     ];
-    if !interesting_headers
+    if interesting_headers
         .iter()
         .any(|h| h.eq_ignore_ascii_case(&name_str))
     {
@@ -280,7 +307,7 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
         MilterAction::ExtractKeys => {
             // Parse using MIME Parser.
             let body_str = String::from_utf8_lossy(&ctx.body);
-            let container = match MimeContainer::parse_mime_container_data(
+            let _container = match MimeContainer::parse_mime_container_data(
                 &body_str,
                 ctx.headers.clone(), // TODO: eliminate clone if possible
             ) {
@@ -300,18 +327,54 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
     }
 }
 
+async fn skip_this() -> Status {
+    Status::Continue
+}
+
 pub fn assemble_callbacks<'a>(
     cert_dir: PathBuf,
     responsible: Arc<Vec<String>>,
 ) -> Callbacks<MilterContext<'a>> {
     Callbacks::new()
         .on_negotiate(|context, _, _| Box::pin(on_negotiate(context)))
+        .on_connect(|_, _, _| Box::pin(skip_this()))
+        .on_helo(|_, _| Box::pin(skip_this()))
         .on_mail(|context, args| Box::pin(on_mail(context, args)))
         .on_rcpt(|context, args| Box::pin(on_rcpt(context, args)))
+        .on_data(|_| Box::pin(skip_this()))
         .on_header(move |context, name, value| {
             Box::pin(on_header(context, name, value, Arc::clone(&responsible)))
         })
         .on_eoh(|context| Box::pin(on_eoh(context)))
         .on_body(|context, data| Box::pin(on_body(context, data)))
         .on_eom(move |context| Box::pin(on_eom(context, cert_dir.clone())))
+        .on_unknown(|_, _| Box::pin(skip_this()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_email_variants() {
+        let cases = [
+            ("John Doe <john@example.com>", Some("john@example.com")),
+            ("<jane@example.com>", Some("jane@example.com")),
+            ("foo@bar.com", Some("foo@bar.com")),
+            ("  <baz@example.org> ", Some("baz@example.org")),
+            ("John Doe", None),
+            ("John Doe john@example.com", None),
+            ("", None),
+            ("   ", None),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                extract_email(input),
+                expected,
+                "Failed on input: {:?}",
+                input
+            );
+        }
+    }
 }

@@ -1,10 +1,10 @@
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
     character::complete::{line_ending, not_line_ending, space0, space1},
     multi::many0,
     sequence::{preceded, terminated},
+    IResult,
 };
 use std::borrow::Cow;
 use uuid::Uuid;

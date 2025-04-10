@@ -13,7 +13,7 @@
     flake-utils,
     rust-overlay,
   }:
-    flake-utils.lib.eachSystem ["x86_64-linux" "i686-linux" "aarch64-linux"]
+    flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"]
     (
       system: let
         overlays = [(import rust-overlay)];
@@ -35,12 +35,13 @@
         };
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            (rust-bin.stable.latest.default.override {
+            (rust-bin.stable."1.86.0".default.override {
               extensions = ["llvm-tools-preview"];
             })
             cargo-bloat
             cargo-llvm-cov
             llvmPackages_19.bintools
+            openssl
           ];
         };
 

@@ -1,6 +1,8 @@
 {
   lib,
   rustPlatform,
+  pkg-config,
+  openssl,
   ...
 }:
 rustPlatform.buildRustPackage {
@@ -11,13 +13,16 @@ rustPlatform.buildRustPackage {
     (path: type: builtins.any (suf: hasPrefix (toString suf) path) [./src ./Cargo.toml ./Cargo.lock])
     ./.;
 
+  nativeBuildInputs = [ pkg-config ];
+  buildInputs = [ openssl ];
+
   cargoLock = {
     lockFile = ./Cargo.lock;
   };
 
   meta = with lib; {
     mainProgram = "pantosmimed";
-    platforms = platforms.linux;
+    platforms = platforms.unix;
     license = licenses.isc;
     maintainers = [maintainers.vifino];
   };
