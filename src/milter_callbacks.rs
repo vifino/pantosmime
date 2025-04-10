@@ -2,8 +2,8 @@ use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine};
 use bytes::{Bytes, BytesMut};
 use indymilter::{
-    Actions, Callbacks, Context, ContextActions, EomActions, EomContext, IntoCString,
-    NegotiateContext, Status,
+    Actions, Callbacks, Context, ContextActions, EomActions, EomContext, IntoCString, MacroStage,
+    Macros, NegotiateContext, Status,
 };
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -28,6 +28,7 @@ pub struct MilterContext<'a> {
     action: Option<MilterAction>,
     sender: String,
     recipients: Vec<String>,
+    queue_id: Option<String>,
 
     headers: Vec<(Cow<'a, str>, Cow<'a, str>)>,
     body: BytesMut,
@@ -46,18 +47,47 @@ pub fn extract_email(input: &str) -> Option<&str> {
         .map(|m| m.as_str())
 }
 
+/// Try to get Queue ID from the macros of the current context.
+fn get_queue_id_macro<'a>(macros: &Macros) -> Option<String> {
+    macros
+        .get(c"i")
+        .and_then(|cstr| Some(cstr.to_string_lossy().into_owned()))
+}
+
+fn try_get_queue_id<'a>(macros: &Macros, context: &mut Option<MilterContext<'a>>) -> String {
+    let ctx = match context {
+        Some(ctx) => ctx,
+        None => {
+            return String::from("<none>");
+        }
+    };
+
+    if ctx.queue_id.is_none() {
+        ctx.queue_id = get_queue_id_macro(macros);
+    }
+    ctx.queue_id.clone().unwrap_or(String::from("<none>"))
+}
+
 /// Negotiate the required actions for the signing/encrypting dance.
-#[tracing::instrument(name = "on_negotiate", skip(context))]
+#[tracing::instrument(skip(context))]
 async fn on_negotiate<'a>(context: &mut NegotiateContext<MilterContext<'a>>) -> Status {
     // We need a few special actions.
     context.requested_actions |=
         Actions::ADD_HEADER | Actions::CHANGE_HEADER | Actions::REPLACE_BODY;
     info!("Negotiating actions: added ADD_HEADER, CHANGE_HEADER, and REPLACE_BODY");
+
+    let macros = &mut context.requested_macros;
+    macros.insert(MacroStage::Mail, c"i".into());
+    macros.insert(MacroStage::Rcpt, c"i".into());
+    macros.insert(MacroStage::Eoh, c"i".into());
+    macros.insert(MacroStage::Data, c"i".into());
+    macros.insert(MacroStage::Eom, c"i".into());
+
     Status::Continue
 }
 
 /// Check if sender is in whitelist.
-#[tracing::instrument(name = "on_mail", skip(context, args))]
+#[tracing::instrument(skip(context, args), fields(queue = try_get_queue_id(&context.macros, &mut context.data)))]
 async fn on_mail<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString>) -> Status {
     if let Some(sender) = args.into_iter().next() {
         let sender_email = match extract_email(&sender.to_string_lossy()) {
@@ -82,7 +112,7 @@ async fn on_mail<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString
 
 /// Check if keys are available for recipient.
 /// If yes, add to recipients, otherwise reject
-#[tracing::instrument(name = "on_rcpt", skip(context, args))]
+#[tracing::instrument(skip(context, args), fields(queue = try_get_queue_id(&context.macros, &mut context.data)))]
 async fn on_rcpt<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString>) -> Status {
     if let Some(recipient) = args.into_iter().next() {
         if let Some(ctx) = &mut context.data {
@@ -107,7 +137,7 @@ async fn on_rcpt<'a>(context: &mut Context<MilterContext<'a>>, args: Vec<CString
 }
 
 /// Process headers
-#[tracing::instrument(name = "on_header", skip(context, name, value, responsible))]
+#[tracing::instrument(skip(context, name, value, responsible), fields(queue = try_get_queue_id(&context.macros, &mut context.data)))]
 async fn on_header<'a>(
     context: &mut Context<MilterContext<'a>>,
     name: CString,
@@ -167,7 +197,7 @@ async fn on_header<'a>(
 }
 
 /// Check if Headers are complete enough to encrypt content.
-#[tracing::instrument(name = "on_eoh", skip(context))]
+#[tracing::instrument(skip(context), fields(queue = try_get_queue_id(&context.macros, &mut context.data)))]
 async fn on_eoh<'a>(context: &mut Context<MilterContext<'a>>) -> Status {
     if let Some(ctx) = &mut context.data {
         if ctx.headers.is_empty() {
@@ -183,7 +213,7 @@ async fn on_eoh<'a>(context: &mut Context<MilterContext<'a>>) -> Status {
 }
 
 /// Parse body
-#[tracing::instrument(name = "on_body", skip(context, data))]
+#[tracing::instrument(skip(context, data), fields(queue = try_get_queue_id(&context.macros, &mut context.data)))]
 async fn on_body<'a>(context: &mut Context<MilterContext<'a>>, data: Bytes) -> Status {
     if let Some(ctx) = &mut context.data {
         ctx.body.extend_from_slice(&data);
@@ -195,7 +225,7 @@ async fn on_body<'a>(context: &mut Context<MilterContext<'a>>, data: Bytes) -> S
     }
 }
 
-#[tracing::instrument(name = "update_headers", skip(ctx, actions, new_headers))]
+#[tracing::instrument(skip(ctx, actions, new_headers))]
 async fn update_headers<'a>(
     ctx: &mut MilterContext<'a>,
     actions: &EomActions,
@@ -250,7 +280,7 @@ fn wrap_bytes_crlf(buf: &mut BytesMut, wrap_at: usize) {
 }
 
 /// Actually rewrite the content!
-#[tracing::instrument(name = "on_eom", skip(context, cert_dir))]
+#[tracing::instrument(skip(context, cert_dir), fields(queue = try_get_queue_id(&context.macros, &mut context.data)))]
 async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathBuf) -> Status {
     let ctx = match context.data.as_mut() {
         Some(ctx) => ctx,
@@ -310,6 +340,17 @@ async fn on_eom<'a>(context: &mut EomContext<MilterContext<'a>>, cert_dir: PathB
                 error!("Failed to replace body after encryption");
                 return Status::Reject;
             }
+            if context
+                .actions
+                .add_header(
+                    "X-PANTOSMIME",
+                    "Successfully encrypted plain-text message. Yay!",
+                )
+                .await
+                .is_err()
+            {
+                error!("Failed adding X-PANOSMIME header")
+            };
             info!("Encryption successful, accepting mail");
             Status::Accept
         }

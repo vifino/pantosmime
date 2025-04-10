@@ -128,3 +128,5 @@ where
     cms.to_der()
         .with_context(|| format!("Failed to convert CMS result to DER"))
 }
+
+// TODO: Test at least extract_certificates_from_p7s
