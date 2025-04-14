@@ -34,6 +34,7 @@
           default = pantosmime;
         };
         devShells.default = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [ pkg-config ];
           buildInputs = with pkgs; [
             (rust-bin.stable."1.86.0".default.override {
               extensions = ["llvm-tools-preview"];
