@@ -1,0 +1,44 @@
+Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha256";
+ boundary="_1D02E938-3E07-FD42-894E-EEB0552D2A34_"
+MIME-Version: 1.0
+
+--_1D02E938-3E07-FD42-894E-EEB0552D2A34_
+Content-Type: multipart/related;
+	boundary="_249535DD-7B1F-9646-83F1-06BDAD313349_"
+
+--_249535DD-7B1F-9646-83F1-06BDAD313349_
+Content-Type: multipart/alternative;
+	boundary="_37383AA4-1998-AA48-9C6A-5015C6A2BCD3_"
+
+--_37383AA4-1998-AA48-9C6A-5015C6A2BCD3_
+Content-Transfer-Encoding: base64
+Content-Type: text/plain; charset="utf-8"
+
+boop
+
+--_37383AA4-1998-AA48-9C6A-5015C6A2BCD3_
+Content-Transfer-Encoding: base64
+Content-Type: text/html; charset="utf-8"
+
+boop
+
+--_37383AA4-1998-AA48-9C6A-5015C6A2BCD3_--
+
+--_249535DD-7B1F-9646-83F1-06BDAD313349_
+Content-Type: image/png; name="image001.png"
+Content-ID: <image001.png@01DBAD77.9FCAC0A0>
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="image001.png"
+
+boop
+
+--_249535DD-7B1F-9646-83F1-06BDAD313349_--
+
+--_1D02E938-3E07-FD42-894E-EEB0552D2A34_
+Content-Type: application/x-pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+
+boop
+
+--_1D02E938-3E07-FD42-894E-EEB0552D2A34_--
+

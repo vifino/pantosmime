@@ -10,7 +10,7 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
   src = with lib.strings;
     builtins.filterSource
-    (path: type: builtins.any (suf: hasPrefix (toString suf) path) [./src ./Cargo.toml ./Cargo.lock])
+    (path: type: builtins.any (suf: hasPrefix (toString suf) path) [./src ./data ./Cargo.toml ./Cargo.lock])
     ./.;
 
   nativeBuildInputs = [pkg-config];

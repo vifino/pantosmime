@@ -116,22 +116,34 @@ fn parse_multipart_container<'a>(
 ) -> IResult<&'a str, MimeContainer<'a>> {
     let boundary_marker_string = &format!("\r\n--{}", boundary);
     let boundary_marker = boundary_marker_string.as_str();
+    let boundary_marker_only = &boundary_marker[2..];
     let mut buf = input;
+    let mut no_newline = !input.starts_with("\r\n");
 
     // The preamble is everything before the first boundary marker.
     // We're slightly unconformant. If the exact boundary follows, but no newline or --,
     // this check will pass and cause the preamble to be skipped, but the later parsing will error
     // out. Sucks.
-    let (i, preamble) = match buf.starts_with(&boundary_marker[2..]) {
+    let (i, preamble) = match buf.starts_with(if no_newline {
+        boundary_marker_only
+    } else {
+        boundary_marker
+    }) {
         true => (input, ""),
         false => take_until(boundary_marker)(buf)?,
     };
 
     buf = i;
+    no_newline = !buf.starts_with("\r\n");
     let mut parts = Vec::new();
     loop {
         // Consume boundary marker and check if it's the end.
-        let (i, _) = tag(boundary_marker)(buf)?;
+        let (i, _) = if no_newline {
+            no_newline = false;
+            tag(boundary_marker_only)(buf)
+        } else {
+            tag(boundary_marker)(buf)
+        }?;
         let (i, boundary_followup) = alt((tag("--"), preceded(space0, line_ending)))(i)?;
         if boundary_followup == "--" {
             buf = i;
@@ -239,29 +251,13 @@ mod tests {
     use super::*;
 
     // A simple single-part message.
-    const SINGLE_EMAIL: &str = "\
-Content-Type: text/plain\r\n\
-From: test@example.com\r\n\
-\r\n\
-Hello, this is a test email body.";
+    const SINGLE_EMAIL: &str = include_str!("../data/mime/simple_email.eml");
 
-    // A multipart message taken from the example.
-    const MULTIPART_EMAIL: &str = "\
-MIME-Version: 1.0\r\n\
-Content-Type: multipart/mixed; boundary=frontier\r\n\
-\r\n\
-This is a message with multiple parts in MIME format.\r\n\
---frontier\r\n\
-Content-Type: text/plain\r\n\
-\r\n\
-This is the body of the message.\r\n\
---frontier\r\n\
-Content-Type: application/octet-stream\r\n\
-Content-Transfer-Encoding: base64\r\n\
-\r\n\
-PGh0bWw+CiAgPGhlYWQ+CiAgPC9oZWFkPgogIDxib2R5PgogICAgPHA+VGhpcyBpcyB0aGUg\r\n\
-Ym9keSBvZiB0aGUgbWVzc2FnZS48L3A+CiAgPC9ib2R5Pgo8L2h0bWw+Cg==\r\n\
---frontier--\r\n";
+    // A multipart message taken from the example of the Wikipedia MIME page.
+    const MULTIPART_EXAMPLE: &str = include_str!("../data/mime/multipart_example.eml");
+
+    // A multipart in multipart email, as sent by Outlook on macOS, sans content...
+    const MULTIPART_MATRYOSHKA: &str = include_str!("../data/mime/multipart_matryoshka.eml");
 
     #[test]
     fn test_parse_single_part() {
@@ -273,16 +269,15 @@ Ym9keSBvZiB0aGUgbWVzc2FnZS48L3A+CiAgPC9ib2R5Pgo8L2h0bWw+Cg==\r\n\
         // The body is the entire message body.
         assert_eq!(
             container.body,
-            Cow::Borrowed("Hello, this is a test email body.")
+            Cow::Borrowed("Hello, this is a test email body.\r\n")
         );
         // Header order preserved.
         assert_eq!(container.headers.len(), 2);
         assert_eq!(container.headers[0].0, Cow::Borrowed("Content-Type"));
     }
-
     #[test]
     fn test_parse_multipart() {
-        let res = MimeContainer::parse_mime_container(MULTIPART_EMAIL);
+        let res = MimeContainer::parse_mime_container(MULTIPART_EXAMPLE);
         assert!(res.is_ok(), "Parsing multipart failed: {:?}", res);
         let (_remaining, container) = res.unwrap();
         // For multipart, there should be parts.
@@ -303,6 +298,46 @@ Ym9keSBvZiB0aGUgbWVzc2FnZS48L3A+CiAgPC9ib2R5Pgo8L2h0bWw+Cg==\r\n\
         assert_eq!(part2.headers.len(), 2);
         assert!(part2.body.contains("PGh0bWw+CiAgPGhlYWQ+CiAgPC9oZWFkPg"));
     }
+    #[test]
+    fn test_parse_matryoshka() {
+        let (_remaining, container) =
+            MimeContainer::parse_mime_container(MULTIPART_MATRYOSHKA).unwrap();
+        println!("Content-Type: {:?}", get_content_type(&container.headers));
+        assert_eq!(container.parts.len(), 2);
+        let (matryoshka, signature) = (&container.parts[0], &container.parts[1]);
+
+        // Test nested MIME multipart.
+        assert_eq!(matryoshka.parts.len(), 2);
+        {
+            let (matryoshka, image) = (&matryoshka.parts[0], &matryoshka.parts[1]);
+            assert_eq!(matryoshka.parts.len(), 2);
+            {
+                let (plain, html) = (&matryoshka.parts[0], &matryoshka.parts[1]);
+
+                assert!(get_content_type(&plain.headers)
+                    .expect("Content-Type header not found")
+                    .contains("text/plain"));
+                assert_eq!(plain.parts.len(), 0);
+
+                assert!(get_content_type(&html.headers)
+                    .expect("Content-Type header not found")
+                    .contains("text/html"));
+                assert_eq!(html.parts.len(), 0);
+            }
+
+            // Test image.
+            assert!(get_content_type(&image.headers)
+                .expect("Content-Type header not found")
+                .contains("image/png"));
+            assert_eq!(signature.parts.len(), 0);
+        }
+
+        // Test signature.
+        assert!(get_content_type(&signature.headers)
+            .expect("Content-Type header not found")
+            .contains("pkcs7-signature"));
+        assert_eq!(signature.parts.len(), 0);
+    }
 
     #[test]
     fn test_serialization_single() {
@@ -311,10 +346,10 @@ Ym9keSBvZiB0aGUgbWVzc2FnZS48L3A+CiAgPC9ib2R5Pgo8L2h0bWw+Cg==\r\n\
         assert!(serialized.contains("Content-Type: text/plain"));
         assert!(serialized.contains("Hello, this is a test email body."));
     }
-
     #[test]
     fn test_serialization_multipart() {
-        let (_remaining, container) = MimeContainer::parse_mime_container(MULTIPART_EMAIL).unwrap();
+        let (_remaining, container) =
+            MimeContainer::parse_mime_container(MULTIPART_EXAMPLE).unwrap();
         let serialized = container.to_mime_string();
         assert!(serialized.contains("This is a message with multiple parts in MIME format."));
         assert!(serialized.contains("--frontier") || serialized.contains("BOUNDARY-"));
@@ -331,17 +366,39 @@ Ym9keSBvZiB0aGUgbWVzc2FnZS48L3A+CiAgPC9ib2R5Pgo8L2h0bWw+Cg==\r\n\
     }
     #[test]
     fn test_round_trip_multipart() {
-        let (_remaining, container) = MimeContainer::parse_mime_container(MULTIPART_EMAIL).unwrap();
+        let (_remaining, container) =
+            MimeContainer::parse_mime_container(MULTIPART_EXAMPLE).unwrap();
         let serialized = container.to_mime_string();
         let (_remaining2, container2) = MimeContainer::parse_mime_container(&serialized).unwrap();
         assert_eq!(container, container2, "Round-trip serialization failed");
     }
     #[test]
+    fn test_round_trip_mime_matryoshka() {
+        let (_remaining, container) =
+            MimeContainer::parse_mime_container(MULTIPART_MATRYOSHKA).unwrap();
+        let serialized = container.to_mime_string();
+        let (_remaining2, container2) = MimeContainer::parse_mime_container(&serialized).unwrap();
+        assert_eq!(container, container2, "Round-trip serialization failed");
+    }
+
+    #[test]
     fn test_multipart_against_original() {
-        let (_remaining, container) = MimeContainer::parse_mime_container(MULTIPART_EMAIL).unwrap();
+        let (_remaining, container) =
+            MimeContainer::parse_mime_container(MULTIPART_EXAMPLE).unwrap();
         let serialized = container.to_mime_string();
         assert_eq!(
-            serialized, MULTIPART_EMAIL,
+            serialized, MULTIPART_EXAMPLE,
+            "Serialization does not match original"
+        );
+    }
+    #[ignore]
+    #[test]
+    fn test_matryoshka_against_original() {
+        let (_remaining, container) =
+            MimeContainer::parse_mime_container(MULTIPART_MATRYOSHKA).unwrap();
+        let serialized = container.to_mime_string();
+        assert_eq!(
+            serialized, MULTIPART_MATRYOSHKA,
             "Serialization does not match original"
         );
     }
