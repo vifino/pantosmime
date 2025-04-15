@@ -13,7 +13,10 @@
     flake-utils,
     rust-overlay,
   }:
-    flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"]
+    {
+      nixosModules.pantosmime = import ./module.nix;
+    }
+    // flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"]
     (
       system: let
         overlays = [(import rust-overlay)];
@@ -34,7 +37,7 @@
           default = pantosmime;
         };
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [pkg-config];
           buildInputs = with pkgs; [
             (rust-bin.stable."1.86.0".default.override {
               extensions = ["llvm-tools-preview"];
@@ -45,14 +48,6 @@
             openssl
           ];
         };
-
-        checks = {
-          #loop = import ./tests/loop.nix checkArgs;
-          #tcp = import ./tests/tcp.nix checkArgs;
-          #tcp-ipv6 = import ./tests/tcp-ipv6.nix checkArgs;
-          #rdma = import ./tests/rdma.nix checkArgs;
-        };
-
         formatter = pkgs.alejandra;
       }
     );
