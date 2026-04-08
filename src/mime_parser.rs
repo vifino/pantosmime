@@ -19,7 +19,7 @@ pub struct MimeContainer<'a> {
 }
 
 /// Parse a single header line, supporting folded lines (i.e. lines that begin with a space or tab).
-fn parse_header(input: &str) -> IResult<&str, (Cow<str>, Cow<str>)> {
+fn parse_header(input: &str) -> IResult<&str, (Cow<'_, str>, Cow<'_, str>)> {
     // Header names: alphanumerics, '-' and '_'
     let (input, name) =
         take_while1(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_')(input)?;
@@ -49,7 +49,7 @@ fn line_ending_custom(input: &str) -> IResult<&str, &str> {
 }
 
 /// Parse all headers until an empty line is encountered.
-fn parse_headers(input: &str) -> IResult<&str, Vec<(Cow<str>, Cow<str>)>> {
+fn parse_headers(input: &str) -> IResult<&str, Vec<(Cow<'_, str>, Cow<'_, str>)>> {
     let mut headers = Vec::new();
     let mut input = input;
     loop {
