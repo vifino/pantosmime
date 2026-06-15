@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -39,7 +39,7 @@
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [pkg-config];
           buildInputs = with pkgs; [
-            (rust-bin.stable."1.94.1".default.override {
+            (rust-bin.stable."1.96.0".default.override {
               extensions = ["llvm-tools-preview"];
             })
             cargo-bloat
